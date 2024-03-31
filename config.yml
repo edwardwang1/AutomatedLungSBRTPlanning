@@ -1,0 +1,15 @@
+DATA_DIR: "Stack"
+TRAIN_PATIENT_LIST: "Data/train.txt"
+TEST_PATIENT_LIST: "Data/test.txt"
+SAVE_DIR : "Output"
+EXP_NAME : "Test"
+NUM_EPOCHS: 2
+BATCH_SIZE: 2
+ALPHA: [0.01]
+BETA: [0.1]
+LOSS_TYPE: ["l1"]
+ADV_LOSS_TYPE: ["ls"]
+D_UPDATE_RATIO: [0.1]
+G_LR: [2e-4]
+D_LR: [2e-4]
+LOG_INTERVAL: 1
