@@ -162,7 +162,7 @@ class Generator(nn.Module):
         return x
 
 class AttentionGenerator(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels=1):
         #adapated from https://github.com/LeeJunHyun/Image_Segmentation/blob/master/network.py
         super(AttentionGenerator, self).__init__()
 
@@ -199,9 +199,7 @@ class AttentionGenerator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-    def forward(self, x, cond=None):
-        if cond is not None:
-            x = torch.cat((x, cond), dim=1)
+    def forward(self, x):
         x = self.first_layer(x)
         skip_connections = []
         for d in self.downs:
@@ -220,7 +218,6 @@ class AttentionGenerator(nn.Module):
 
         for i in range(len(self.ups)):
             if i == 0:
-                #   print(x.shape, x_prev.shape)
                 u = self.ups[i]
                 attention_out = self.attentions[i](x, x_prev)
                 concat = torch.cat((x, attention_out), dim=1)
@@ -263,44 +260,164 @@ class Discriminator(nn.Module):
             #nn.Sigmoid()
         )
 
-    def forward(self, x, alt_cond, oars=None):
+    def forward(self, x, alt_cond):
         x = torch.cat((x, alt_cond), dim=1)
-        if oars is not None:
-            x = torch.cat((x, oars), dim=1)
-
         for d in self.downs:
             x = d(x)
 
-        orig_shape = x.shape
         if self.verbose:
             print("before last layer", x.shape)
         x = self.last_layer(x)
         if self.verbose:
             print("after last layer", x.shape)
 
-        # pad to original shape
-        # if x.shape != orig_shape:
-        #     difference = np.array(orig_shape) - np.array(x.shape)
-        #     #        print(difference)
-        #     x = nn.functional.pad(x, (difference[3], 0, difference[4], 0, difference[2], 0))
-        #     if self.verbose:
-        #         print("x", x.shape)
 
         return x
 
+class DenseConvolve(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DenseConvolve, self).__init__()
+        self.pipeline = nn.Sequential(nn.Conv3d(in_channels, out_channels - in_channels, 3, 1, 1),
+                    nn.ReLU(inplace=True)
+                                      )
+        self.pipeline.apply(init_weights)
+
+    def forward(self, x):
+        x2 = self.pipeline(x)
+        return torch.cat((x, x2), dim=1)
+
+class DenseDownsample(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DenseDownsample, self).__init__()
+        self.pipeline = nn.Sequential(nn.Conv3d(in_channels, out_channels - in_channels, 4, 2, 1),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.MaxPool3d(2)
+        self.pipeline.apply(init_weights)
+
+    def forward(self, x):
+        x2 = self.pipeline(x)
+        x = self.pool(x)
+
+        return torch.cat((x, x2), dim=1)
+
+class HDUNetUpBlock(nn.Module):
+    def __init__(self, in_size, out_size):
+        super(HDUNetUpBlock, self).__init__()
+        self.pipeline = nn.Sequential(
+            nn.ConvTranspose3d(in_size, out_size, 4, 2, padding=1, bias=False),
+            nn.ReLU(inplace=True),
+        )
+        self.pipeline.apply(init_weights)
+
+    def forward(self, x):
+        return self.pipeline(x)
+
+class DenseConvolvePaired(nn.Module):
+    def __init__(self, in_channels, channel_increment=16):
+        super(DenseConvolvePaired, self).__init__()
+        self.DenseConvolve1 = DenseConvolve(in_channels, in_channels + channel_increment)
+        self.DenseConvolve2 = DenseConvolve(in_channels + channel_increment, in_channels + 2 * channel_increment)
+
+    def forward(self, x):
+        x = self.DenseConvolve1(x)
+        x = self.DenseConvolve2(x)
+        return x
+
+class HDUnet(nn.Module):
+    def __init__(self, in_channels, out_channels=1, verbose=False):
+        super(HDUnet, self).__init__()
+        self.verbose = verbose
+
+        #Increment num features by 16 for every convolution operation
+        self.CHANNEL_INCREMENT = 16
+
+        self.DenseConvolvePaired1 = DenseConvolvePaired(in_channels, self.CHANNEL_INCREMENT)
+        self.DenseDownsample1 = DenseDownsample(in_channels + 2 * self.CHANNEL_INCREMENT, in_channels + 3 * self.CHANNEL_INCREMENT)
+        self.DenseConvolvePaired2 = DenseConvolvePaired(in_channels + 3 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseDownsample2 = DenseDownsample(in_channels + 5 * self.CHANNEL_INCREMENT, in_channels + 6 * self.CHANNEL_INCREMENT)
+        self.DenseConvolvePaired3 = DenseConvolvePaired(in_channels + 6 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseDownsample3 = DenseDownsample(in_channels + 8 * self.CHANNEL_INCREMENT, in_channels + 9 * self.CHANNEL_INCREMENT)
+        self.DenseConvolvePaired4 = DenseConvolvePaired(in_channels + 9 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.Downsample4 = DenseDownsample(in_channels + 11 * self.CHANNEL_INCREMENT, in_channels + 12 * self.CHANNEL_INCREMENT)
+        self.DenseConvolvePaired5 = DenseConvolvePaired(in_channels + 12 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseConvolvePaired6 = DenseConvolvePaired(in_channels + 14 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseUpsample1 = HDUNetUpBlock(in_channels + 16 * self.CHANNEL_INCREMENT, in_channels + 15 * self.CHANNEL_INCREMENT - (in_channels + 11 * self.CHANNEL_INCREMENT))
+        self.DenseConvolvePaired7 = DenseConvolvePaired(in_channels + 15 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseUpsample2 = HDUNetUpBlock(in_channels + 17 * self.CHANNEL_INCREMENT, in_channels + 12 * self.CHANNEL_INCREMENT - (in_channels + 8 * self.CHANNEL_INCREMENT))
+        self.DenseConvolvePaired8 = DenseConvolvePaired(in_channels + 12 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseUpsample3 = HDUNetUpBlock(in_channels + 14 * self.CHANNEL_INCREMENT, in_channels + 9 * self.CHANNEL_INCREMENT - (in_channels + 5 * self.CHANNEL_INCREMENT))
+        self.DenseConvolvePaired9 = DenseConvolvePaired(in_channels + 9 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.DenseUpsample4 = HDUNetUpBlock(in_channels + 11 * self.CHANNEL_INCREMENT, in_channels + 6 * self.CHANNEL_INCREMENT - (in_channels + 2 * self.CHANNEL_INCREMENT))
+        self.DenseConvolvePaired10 = DenseConvolvePaired(in_channels + 6 * self.CHANNEL_INCREMENT, self.CHANNEL_INCREMENT)
+        self.FinalConv = nn.Conv3d(in_channels + 8 * self.CHANNEL_INCREMENT, out_channels, 3, 1, 1)
+
+
+    def forward(self, x):
+        skip_connections = []
+        x = self.DenseConvolvePaired1(x)
+        if self.verbose:
+            print(x.shape)
+        skip_connections.append(x)
+        x = self.DenseDownsample1(x)
+        x = self.DenseConvolvePaired2(x)
+        if self.verbose:
+            print(x.shape)
+        skip_connections.append(x)
+        x = self.DenseDownsample2(x)
+        x = self.DenseConvolvePaired3(x)
+        if self.verbose:
+            print(x.shape)
+        skip_connections.append(x)
+        x = self.DenseDownsample3(x)
+        x = self.DenseConvolvePaired4(x)
+        if self.verbose:
+            print(x.shape)
+        skip_connections.append(x)
+        x = self.Downsample4(x)
+        x = self.DenseConvolvePaired5(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.DenseConvolvePaired6(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.DenseUpsample1(x)
+        x = torch.cat((x, skip_connections.pop()), dim=1)
+        x = self.DenseConvolvePaired7(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.DenseUpsample2(x)
+        x = torch.cat((x, skip_connections.pop()), dim=1)
+        x = self.DenseConvolvePaired8(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.DenseUpsample3(x)
+        x = torch.cat((x, skip_connections.pop()), dim=1)
+        x = self.DenseConvolvePaired9(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.DenseUpsample4(x)
+        x = torch.cat((x, skip_connections.pop()), dim=1)
+        x = self.DenseConvolvePaired10(x)
+        if self.verbose:
+            print(x.shape)
+        x = self.FinalConv(x)
+
+        return x
+
+
 if __name__ == '__main__':
-    model = AttentionGenerator(3, 1)
-    #print(model.first_layer)
-    #model = Discriminator(7, True)
-    x = torch.randn((1, 2, 92, 152, 152))
-    y = torch.randn((1, 1, 92, 152, 152))
+
+    model = HDUnet(10, 1, verbose=True)
+    x = torch.randn((2, 10, 84, 128, 128))
+
+    model = model.cuda()
+    x = x.cuda()
+
+    output = model(x)
+    print(output.shape)
+    #print(output)
 
 
-    #
-    device = torch.device('cuda:0')
-    x = x.to(device)
-    y = y.to(device)
-    model.to(device)
 
-    out = model(x, y)
 

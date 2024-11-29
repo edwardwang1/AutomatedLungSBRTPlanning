@@ -407,5 +407,3 @@ if __name__ == '__main__':
                                     train(data_dir, train_list_path, test_list_path, save_dir,  exp_name_base, exp_name, params)
 
                                     runNum += 1
-
-# C:\Users\wanged\Anaconda3\envs\L
